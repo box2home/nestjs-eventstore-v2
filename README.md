@@ -132,4 +132,4 @@ export class SomeCommandHandler
 })
 export class AppModule {}
 
-```
+```# nestjs-eventstore-v2
