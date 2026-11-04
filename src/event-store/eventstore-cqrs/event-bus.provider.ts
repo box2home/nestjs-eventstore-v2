@@ -1,8 +1,8 @@
 import { Injectable, OnModuleDestroy, Type } from '@nestjs/common';
 import { ModuleRef } from '@nestjs/core';
+import { InstanceWrapper } from '@nestjs/core/injector/instance-wrapper';
 import { Observable, Subscription } from 'rxjs';
 import { filter } from 'rxjs/operators';
-import { isFunction } from 'util';
 import {
   IEventHandler,
   IEvent,
@@ -11,13 +11,22 @@ import {
   InvalidSagaException,
   ISaga,
 } from '@nestjs/cqrs';
-import {
-  SAGA_METADATA,
-  EVENTS_HANDLER_METADATA,
-} from '@nestjs/cqrs/dist/decorators/constants';
 import { EventStoreBus, IEventConstructors } from './event-store.bus';
 import { EventStore } from '../event-store.class';
-import { CqrsOptions } from '@nestjs/cqrs/dist/interfaces/cqrs-options.interface';
+
+/**
+ * Metadata keys used by @nestjs/cqrs.
+ *
+ * They are declared locally instead of being imported from
+ * `@nestjs/cqrs/dist/decorators/constants` because deep imports into
+ * `@nestjs/cqrs/dist/**` are blocked by the `exports` map introduced in
+ * @nestjs/cqrs v12 (ERR_PACKAGE_PATH_NOT_EXPORTED).
+ *
+ * The values are part of the decorator contract and have been stable since
+ * v7, so re-declaring them is safe across v7 -> v12.
+ */
+const SAGA_METADATA = '__saga__';
+const EVENTS_HANDLER_METADATA = '__eventsHandler__';
 
 export enum EventStoreSubscriptionType {
   Persistent,
@@ -48,6 +57,10 @@ export type EventStoreBusConfig = {
   eventInstantiators: IEventConstructors;
 };
 
+/**
+ * @deprecated Handlers are discovered as `InstanceWrapper`s since
+ * @nestjs/cqrs v11. Retained only for backwards compatible type imports.
+ */
 export type EventHandlerType = Type<IEventHandler<IEvent>>;
 
 @Injectable()
@@ -55,7 +68,6 @@ export class EventBusProvider extends ObservableBus<IEvent>
   implements OnModuleDestroy {
   private _publisher: EventStoreBus;
   private readonly subscriptions: Subscription[];
-  private readonly cqrsOptions: CqrsOptions;
 
   constructor(
     private readonly commandBus: CommandBus,
@@ -78,18 +90,22 @@ export class EventBusProvider extends ObservableBus<IEvent>
 
   onModuleDestroy() {
     this.subscriptions.forEach(subscription => subscription.unsubscribe());
+    this.subscriptions.length = 0;
+    if (this._publisher && typeof this._publisher.dispose === 'function') {
+      this._publisher.dispose();
+    }
   }
 
   publish<T extends IEvent>(event: T, stream: string) {
-    this._publisher.publish(event, stream);
+    return this._publisher.publish(event, stream);
   }
 
   publishWithMaxAge<T extends IEvent>(event: T, stream: string) {
-    this._publisher.publishWithMaxAge(event, stream);
+    return this._publisher.publishWithMaxAge(event, stream);
   }
 
   publishAll(events: IEvent[]) {
-    (events || []).forEach(event => this._publisher.publish(event));
+    return (events || []).forEach(event => this._publisher.publish(event));
   }
 
   bind(handler: IEventHandler<IEvent>, name: string) {
@@ -98,27 +114,36 @@ export class EventBusProvider extends ObservableBus<IEvent>
     this.subscriptions.push(subscription);
   }
 
-  registerSagas(types: Type<any>[] = []) {
-    const sagas = types
-      .map((target) => {
-        const metadata = Reflect.getMetadata(SAGA_METADATA, target) || [];
-        const instance = this.moduleRef.get(target, { strict: false });
+  /**
+   * @nestjs/cqrs v11 changed the discovery contract: `ExplorerService.explore()`
+   * returns `InstanceWrapper[]` (v10 and below returned `Type[]`).
+   */
+  registerSagas(wrappers: InstanceWrapper<any>[] = []) {
+    const sagas = wrappers
+      .map((wrapper) => {
+        const target = this.resolveType(wrapper);
+        const metadata: string[] =
+          Reflect.getMetadata(SAGA_METADATA, target) || [];
+        const instance =
+          wrapper.instance ?? this.moduleRef.get(target, { strict: false });
         if (!instance) {
           throw new InvalidSagaException();
         }
-        return metadata.map((key: string) => instance[key]);
+        return metadata.map((key: string) => instance[key].bind(instance));
       })
       .reduce((a, b) => a.concat(b), []);
 
     sagas.forEach(saga => this.registerSaga(saga));
   }
 
-  register(handlers: EventHandlerType[] = []) {
+  register(handlers: InstanceWrapper<IEventHandler>[] = []) {
     handlers.forEach(handler => this.registerHandler(handler));
   }
 
-  protected registerHandler(handler: EventHandlerType) {
-    const instance = this.moduleRef.get(handler, { strict: false });
+  protected registerHandler(handler: InstanceWrapper<IEventHandler>) {
+    const target = this.resolveType(handler);
+    const instance =
+      handler.instance ?? this.moduleRef.get(target, { strict: false });
     if (!instance) {
       return;
     }
@@ -140,7 +165,7 @@ export class EventBusProvider extends ObservableBus<IEvent>
   }
 
   protected registerSaga(saga: ISaga) {
-    if (!isFunction(saga)) {
+    if (typeof saga !== 'function') {
       throw new InvalidSagaException();
     }
     const stream$ = saga(this);
@@ -155,8 +180,26 @@ export class EventBusProvider extends ObservableBus<IEvent>
     this.subscriptions.push(subscription);
   }
 
-  private reflectEventsNames(handler: EventHandlerType): FunctionConstructor[] {
-    return Reflect.getMetadata(EVENTS_HANDLER_METADATA, handler);
+  private reflectEventsNames(
+    handler: InstanceWrapper<IEventHandler>,
+  ): FunctionConstructor[] {
+    return (
+      Reflect.getMetadata(EVENTS_HANDLER_METADATA, this.resolveType(handler)) ||
+      []
+    );
+  }
+
+  /**
+   * Resolves the class reference behind an `InstanceWrapper`. Providers created
+   * through `useValue` / `useFactory` have no `metatype`, so fall back to the
+   * constructor of the resolved instance.
+   */
+  private resolveType(wrapper: InstanceWrapper<any>): Type<any> {
+    const target = wrapper.metatype ?? wrapper.instance?.constructor;
+    if (!target) {
+      throw new InvalidSagaException();
+    }
+    return target as Type<any>;
   }
 
   private useDefaultPublisher() {

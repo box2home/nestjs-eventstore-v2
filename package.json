@@ -15,13 +15,13 @@
     "build": "tsc",
     "prepare": "npm run build",
     "format": "prettier --write \"src/**/*.ts\"",
-    "lint": "tslint -p tsconfig.json -c tslint.json",
-    "lint:fix": "tslint -p tsconfig.json -c tslint.json --fix",
     "check-lite": "npm run lint:fix && npm run prepare",
     "test": "jest",
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
-    "test:e2e": "jest --config ./test/jest-e2e.json"
+    "test:e2e": "jest --config ./test/jest-e2e.json",
+    "lint": "eslint \"src/**/*.ts\"",
+    "lint:fix": "eslint \"src/**/*.ts\" --fix"
   },
   "keywords": [
     "nestjs"
@@ -35,36 +35,40 @@
   },
   "bugs": "https://github.com/daypaio/nestjs-eventstore/issues",
   "peerDependencies": {
-    "@nestjs/common": "^7.0.0",
-    "@nestjs/core": "^7.0.0",
-    "reflect-metadata": "^0.1.13",
-    "rxjs": "^6.5.3"
+    "@nestjs/common": "^11.0.0 || ^12.0.0",
+    "@nestjs/core": "^11.0.0 || ^12.0.0",
+    "@nestjs/cqrs": "^11.0.0 || ^12.0.0",
+    "reflect-metadata": "^0.2.0",
+    "rxjs": "^7.8.0"
   },
   "dependencies": {
-    "@nestjs/common": "^7.0.7",
-    "@nestjs/core": "^7.0.7",
-    "@nestjs/cqrs": "^7.0.0",
-    "node-eventstore-client": "^0.2.16",
-    "reflect-metadata": "^0.1.13",
-    "rxjs": "^6.5.3"
+    "node-eventstore-client": "22.10.2",
+    "uuid": "11.1.1"
   },
   "devDependencies": {
-    "@nestjs/platform-express": "^7.0.7",
-    "@nestjs/testing": "^7.0.7",
+    "@eslint/js": "^10.0.1",
+    "@nestjs/common": "^11.1.11",
+    "@nestjs/core": "^11.1.11",
+    "@nestjs/cqrs": "^11.0.3",
+    "@nestjs/platform-express": "^11.1.11",
+    "@nestjs/testing": "^11.1.11",
     "@types/express": "^4.17.3",
-    "@types/jest": "^25.1.4",
-    "@types/node": "^12.12.33",
-    "@types/supertest": "^2.0.8",
-    "jest": "^25.2.4",
-    "prettier": "^2.0.2",
-    "supertest": "4.0.2",
-    "ts-jest": "^25.3.0",
-    "ts-node": "^8.8.1",
-    "tsc-watch": "^4.2.3",
+    "@types/jest": "^30.0.0",
+    "@types/long": "^5.0.0",
+    "@types/node": "^24.19.2",
+    "@types/supertest": "^6.0.3",
+    "eslint": "^10.13.0",
+    "jest": "^30.5.2",
+    "prettier": "^3.9.10",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2",
+    "supertest": "^7.3.1",
+    "ts-jest": "^29.4.15",
+    "ts-node": "^10.9.2",
+    "tsc-watch": "^7.2.1",
     "tsconfig-paths": "^3.9.0",
-    "tslint": "^5.20.0",
-    "tslint-config-airbnb": "^5.11.2",
-    "typescript": "3.8.3"
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.72.0"
   },
   "jest": {
     "moduleFileExtensions": [
@@ -77,6 +81,12 @@
     "transform": {
       "^.+\\.(t|j)s$": "ts-jest"
     },
+    "moduleNameMapper": {
+      "^node-eventstore-client$": "<rootDir>/__tests__/__mocks__/node-eventstore-client.ts"
+    },
+    "setupFiles": [
+      "reflect-metadata"
+    ],
     "coverageDirectory": "../coverage",
     "testEnvironment": "node"
   }

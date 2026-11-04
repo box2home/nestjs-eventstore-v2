@@ -1,32 +1,47 @@
-import { CqrsModule, EventBus, CommandBus, QueryBus } from '@nestjs/cqrs';
+import { EventBus, CommandBus, QueryBus } from '@nestjs/cqrs';
 import { Global, Module, DynamicModule } from '@nestjs/common';
+import { DiscoveryModule, DiscoveryService, ModuleRef } from '@nestjs/core';
+import { InstanceWrapper } from '@nestjs/core/injector/instance-wrapper';
 import { EventBusProvider, EventStoreBusConfig } from './event-bus.provider';
 import { EventStore } from '../event-store.class';
-import { ExplorerService } from '@nestjs/cqrs/dist/services/explorer.service';
-import { ModuleRef } from '@nestjs/core';
 import {
   EventStoreModule,
   EventStoreModuleAsyncOptions,
 } from '../event-store.module';
 import { EventPublisher } from './event-publisher';
 
+/**
+ * @nestjs/cqrs metadata keys, declared locally to avoid deep imports into
+ * `@nestjs/cqrs/dist/**` which are blocked by the exports map added in v12.
+ */
+const COMMAND_HANDLER_METADATA = '__commandHandler__';
+const QUERY_HANDLER_METADATA = '__queryHandler__';
+const EVENTS_HANDLER_METADATA = '__eventsHandler__';
+const SAGA_METADATA = '__saga__';
+
 @Global()
 @Module({})
 export class EventStoreCqrsModule {
   constructor(
-    private readonly explorerService: ExplorerService,
+    private readonly discoveryService: DiscoveryService,
     private readonly eventsBus: EventBus,
     private readonly commandsBus: CommandBus,
     private readonly queryBus: QueryBus,
-  ) { }
+  ) {}
 
   onModuleInit() {
-    const { events, queries, sagas, commands } = this.explorerService.explore();
+    const providers = this.discoveryService.getProviders();
 
-    this.eventsBus.register(events);
-    this.commandsBus.register(commands);
-    this.queryBus.register(queries);
-    this.eventsBus.registerSagas(sagas);
+    const explore = (metadataKey: string): InstanceWrapper[] =>
+      providers.filter((wrapper) => {
+        const target = wrapper.metatype ?? wrapper.instance?.constructor;
+        return !!target && !!Reflect.getMetadata(metadataKey, target);
+      });
+
+    this.eventsBus.register(explore(EVENTS_HANDLER_METADATA));
+    this.commandsBus.register(explore(COMMAND_HANDLER_METADATA));
+    this.queryBus.register(explore(QUERY_HANDLER_METADATA));
+    this.eventsBus.registerSagas(explore(SAGA_METADATA));
   }
 
   static forRootAsync(
@@ -35,12 +50,11 @@ export class EventStoreCqrsModule {
   ): DynamicModule {
     return {
       module: EventStoreCqrsModule,
-      imports: [EventStoreModule.forRootAsync(options)],
+      imports: [DiscoveryModule, EventStoreModule.forRootAsync(options)],
       providers: [
         CommandBus,
         QueryBus,
         EventPublisher,
-        ExplorerService,
         {
           provide: EventBus,
           useFactory: (commandBus, moduleRef, eventStore) => {
@@ -64,7 +78,6 @@ export class EventStoreCqrsModule {
         EventBus,
         CommandBus,
         QueryBus,
-        ExplorerService,
         EventPublisher,
       ],
     };

@@ -38,6 +38,7 @@ export class EventStoreBus {
   private readonly configuredStreams = new Set<string>();
   private persistentSubscriptions: ExtendedPersistentSubscription[] = [];
   private persistentSubscriptionsCount: number;
+  private retryTimers: NodeJS.Timeout[] = [];
 
   constructor(
     private eventStore: EventStore,
@@ -122,33 +123,52 @@ export class EventStoreBus {
 
     try {
       await this.eventStore.getConnection().appendToStream(stream, -2, [payload]);
-    } catch (err) {
+    } catch (error) {
+      const err = error as Error;
       this.logger.error(err.message, err.stack);
     }
   }
 
-    async publishWithMaxAge(event: any, streamName: string, maxAgeSeconds = 60) {
+  async publishWithMaxAge(
+    event: any,
+    streamName: string,
+    maxAgeSeconds = 60,
+  ): Promise<void> {
+    try {
       const payload: EventData = createEventData(
-          v4(),
-          event.constructor.name,
-          true,
-          Buffer.from(JSON.stringify(event)),
+        v4(),
+        event.constructor.name,
+        true,
+        Buffer.from(JSON.stringify(event)),
       );
 
-      const conn = this.eventStore.getConnection(); // ✅ utiliser getConnection()
+      const conn = this.eventStore.getConnection();
 
-      await conn.appendToStream(streamName, -1, [payload]);
+      // -2 is ExpectedVersion.any; -1 (noStream) would reject the append as
+      // soon as the stream already exists.
+      await conn.appendToStream(streamName, -2, [payload]);
 
       if (!this.configuredStreams.has(streamName)) {
-        const metadata = Buffer.from(JSON.stringify({ $maxAge: maxAgeSeconds }), 'utf8');
+        const metadata = Buffer.from(
+          JSON.stringify({ $maxAge: maxAgeSeconds }),
+          'utf8',
+        );
         await conn.setStreamMetadataRaw(streamName, -2, metadata);
         this.configuredStreams.add(streamName);
-        this.logger.log(`Configured stream ${streamName} with $maxAge = ${maxAgeSeconds}`);
+        this.logger.log(
+          `Configured stream ${streamName} with $maxAge = ${maxAgeSeconds}`,
+        );
       }
+    } catch (error) {
+      // Never reject: callers may fire-and-forget, and an unhandled rejection
+      // terminates the process on Node >= 15 (including Node 24).
+      const err = error as Error;
+      this.logger.error(
+        `[publishWithMaxAge][${streamName}] ${err.message}`,
+        err.stack,
+      );
     }
-
-
-
+  }
 
   async publishAll(events: IEvent[], stream?: string) {
     try {
@@ -160,8 +180,9 @@ export class EventStoreBus {
           Buffer.from(JSON.stringify(event)),
         ),
       ));
-    } catch (err) {
-      this.logger.error(err);
+    } catch (error) {
+      const err = error as Error;
+      this.logger.error(err.message, err.stack);
     }
   }
 
@@ -180,7 +201,8 @@ export class EventStoreBus {
         (sub, reason, error) =>
           this.onDropped(sub as ExtendedCatchUpSubscription, reason, error),
       ) as ExtendedCatchUpSubscription;
-    } catch (err) {
+    } catch (error) {
+      const err = error as Error;
       this.logger.error(err.message, err.stack);
     }
   }
@@ -200,9 +222,13 @@ export class EventStoreBus {
       this.logger.log(`Connection to persistent subscription ${subscriptionName} on stream ${stream} established!`);
       resolved.isLive = true;
       return resolved;
-    } catch (err) {
-      this.logger.error(`[${stream}][${subscriptionName}] ${err.message}`, err.stack);
-      this.reSubscribeToPersistentSubscription(stream, subscriptionName)
+    } catch (error) {
+      const err = error as Error;
+      this.logger.error(
+        `[${stream}][${subscriptionName}] ${err.message}`,
+        err.stack,
+      );
+      this.reSubscribeToPersistentSubscription(stream, subscriptionName);
     }
   }
 
@@ -213,7 +239,13 @@ export class EventStoreBus {
     payload: ResolvedEvent,
   ) {
     const { event } = payload;
-    if ((payload.link !== null && !payload.isResolved) || !event || !event.isJson) {
+    if (!event) {
+      this.logger.error(
+        'Event could not be resolved: payload.event is null (link event is deleted or not yet propagated)',
+      );
+      return;
+    }
+    if ((payload.link !== null && !payload.isResolved) || !event.isJson) {
       this.logger.error(`${event.eventType} could not be resolved!`);
       return;
     }
@@ -223,7 +255,7 @@ export class EventStoreBus {
       return;
     }
     const data = Object.values(JSON.parse(event.data.toString()));
-    this.subject$.next(this.eventHandlers[event.eventType](...data));
+    this.subject$.next(handler(...data));
   }
 
   onDropped(
@@ -242,7 +274,26 @@ export class EventStoreBus {
     subscriptionName: string,
   ){
     this.logger.warn(`connecting to subscription ${subscriptionName} ${stream}. Retrying...`);
-    setTimeout((stream, subscriptionName) => this.subscribeToPersistentSubscription(stream, subscriptionName), 3000, stream, subscriptionName);
+    const timer = setTimeout(
+      () => {
+        this.retryTimers = this.retryTimers.filter(t => t !== timer);
+        this.subscribeToPersistentSubscription(stream, subscriptionName);
+      },
+      3000,
+    );
+    this.retryTimers.push(timer);
+    if (typeof timer.unref === 'function') {
+      timer.unref();
+    }
+  }
+
+  /**
+   * Clears pending reconnect timers. Called from `EventBusProvider.onModuleDestroy`
+   * so a shut-down application does not keep the event loop alive.
+   */
+  dispose() {
+    this.retryTimers.forEach(timer => clearTimeout(timer));
+    this.retryTimers = [];
   }
 
   onLiveProcessingStarted(subscription: ExtendedCatchUpSubscription) {
