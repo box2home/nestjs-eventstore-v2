@@ -8,6 +8,10 @@
  * `node-eventstore-client` is pure JavaScript over the legacy TCP API
  * (port 1113) and protobufjs - there are no native bindings and no gRPC.
  *
+ * The script waits for a successful read before writing: EventStoreDB opens
+ * TCP 1113 while it is still recovering chunks, so a TCP accept alone is not
+ * a readiness signal.
+ *
  * Usage:
  *   npm run build
  *   docker run -d --name nes-smoke -p 1113:1113 -p 2113:2113 \
@@ -47,11 +51,58 @@ function waitFor(predicate, timeoutMs = 15000) {
   });
 }
 
+/**
+ * EventStoreDB starts listening on TCP 1113 before it has finished replaying
+ * and verifying chunks. A write issued in that window is retried by the
+ * client until it hits the retry limit, so a TCP accept (or even a read of a
+ * missing stream) is not a readiness signal. Only a successful write is.
+ *
+ * `store.getConnection()` is read on every attempt because the library
+ * replaces the connection object when it reconnects.
+ */
+async function waitForServerReady(store, timeoutMs = 180000) {
+  const probeStream = 'smoke-readiness';
+  const startedAt = Date.now();
+  let attempt = 0;
+
+  for (;;) {
+    const connection = store.getConnection();
+    try {
+      if (!connection) {
+        throw new Error('no active connection');
+      }
+      await connection.appendToStream(probeStream, -2, [
+        createEventData(
+          v4(),
+          'SmokeReady',
+          true,
+          Buffer.from(JSON.stringify({ ready: true })),
+        ),
+      ]);
+      return;
+    } catch (error) {
+      if (Date.now() - startedAt >= timeoutMs) {
+        throw new Error(
+          `server not ready after ${timeoutMs}ms: ${error.message}`,
+        );
+      }
+      const delay = Math.min(500 * 2 ** attempt, 5000);
+      attempt += 1;
+      console.log(
+        `   waiting for EventStore recovery (${error.message.split('\n')[0]}); retry ${attempt} in ${delay}ms`,
+      );
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+}
+
 let store;
 
 (async () => {
   store = new EventStore({}, { host: HOST, port: PORT });
   await waitFor(() => store.isConnected);
+
+  await waitForServerReady(store);
   console.log('1) connect ......................... PASS');
 
   const connection = store.getConnection();
@@ -117,6 +168,11 @@ let store;
   console.log(`ALL TCP CHECKS PASSED ON ${process.version}`);
 })().catch((error) => {
   console.error(`FAIL: ${error.message}`);
+  if (/timeout after/.test(error.message)) {
+    console.error(
+      `Hint: is EventStoreDB running and reachable at ${HOST}:${PORT}?`,
+    );
+  }
   process.exitCode = 1;
 }).finally(() => {
   if (store) store.onApplicationShutdown();
